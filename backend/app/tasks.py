@@ -24,17 +24,13 @@ class CallbackTask(Task):
 def process_document(self=None, job_id: int=None):
     """Main task to process a document and generate summary"""
 
-    # Get the transaction created by CeleryIntegration
-    transaction = sentry_sdk.get_current_scope().transaction
-
-    # Set basic tags on the transaction (for searchability)
-    if transaction:
-        transaction.set_tag("job.id", job_id)
-        transaction.set_tag("task.name", "process_document")
-
-    # Get the current span (which is the transaction) to set attributes
+    # Get the current span (transaction created by CeleryIntegration)
     current_span = get_current_span()
     if current_span:
+        # Set tags on the transaction
+        current_span.set_tag("job.id", job_id)
+        current_span.set_tag("task.name", "process_document")
+        # Set data attributes
         current_span.set_data("job.id", int(job_id))
 
     db = SessionLocal()
@@ -50,14 +46,15 @@ def process_document(self=None, job_id: int=None):
                 raise ValueError(f"Document {job.document_id} not found")
 
         # Set document and provider tags on transaction
-        if transaction:
-            transaction.set_tag("document.id", document.id)
-            transaction.set_tag("document.type", document.document_type)
-            transaction.set_tag("ai.provider", job.ai_provider)
+        current_span = get_current_span()
+        if current_span:
+            current_span.set_tag("document.id", document.id)
+            current_span.set_tag("document.type", document.document_type)
+            current_span.set_tag("ai.provider", job.ai_provider)
             if job.fallback_provider:
-                transaction.set_tag("ai.fallback_provider", job.fallback_provider)
-            transaction.set_tag("job.is_demo", job.is_demo)
-            transaction.set_tag("job.retry_count", job.retry_count)  # Add retry count as tag
+                current_span.set_tag("ai.fallback_provider", job.fallback_provider)
+            current_span.set_tag("job.is_demo", job.is_demo)
+            current_span.set_tag("job.retry_count", job.retry_count)  # Add retry count as tag
 
         # Set span attributes on the transaction for metrics
         current_span = get_current_span()
@@ -286,9 +283,10 @@ def process_document(self=None, job_id: int=None):
             db.commit()
 
         # Set final transaction tags
-        if transaction:
-            transaction.set_tag("job.status", "completed")
-            transaction.set_tag("ai.provider.final", result.provider_used)
+        current_span = get_current_span()
+        if current_span:
+            current_span.set_tag("job.status", "completed")
+            current_span.set_tag("ai.provider.final", result.provider_used)
 
         # Update transaction span attributes with final metrics
         current_span = get_current_span()
@@ -300,15 +298,16 @@ def process_document(self=None, job_id: int=None):
             current_span.set_data("job.status", "completed")
 
         # Set data on the transaction for detailed view
-        if transaction:
-            transaction.set_data("job.id", job_id)
-            transaction.set_data("job.tokens.total", result.tokens_used)
-            transaction.set_data("job.cost.total", result.cost)
-            transaction.set_data("job.processing_time_seconds", job.processing_time)
-            transaction.set_data("job.document.type", document.document_type)
-            transaction.set_data("job.document.size_bytes", document.file_size)
+        current_span = get_current_span()
+        if current_span:
+            current_span.set_data("job.id", job_id)
+            current_span.set_data("job.tokens.total", result.tokens_used)
+            current_span.set_data("job.cost.total", result.cost)
+            current_span.set_data("job.processing_time_seconds", job.processing_time)
+            current_span.set_data("job.document.type", document.document_type)
+            current_span.set_data("job.document.size_bytes", document.file_size)
             if job.estimated_cost:
-                transaction.set_data("job.cost.savings", job.estimated_cost - result.cost)
+                current_span.set_data("job.cost.savings", job.estimated_cost - result.cost)
 
         # Set detailed context for Sentry
         set_context("job_metrics", {
@@ -351,14 +350,12 @@ def process_document(self=None, job_id: int=None):
         sentry_sdk.capture_exception(e)
 
         # Set error tags on transaction
-        if transaction:
-            transaction.set_tag("job.status", "failed")
-            transaction.set_tag("error.type", type(e).__name__)
-
-        # Set error data on transaction
-        if transaction:
-            transaction.set_data("error.message", str(e))
-            transaction.set_data("job.id", job_id)
+        current_span = get_current_span()
+        if current_span:
+            current_span.set_tag("job.status", "failed")
+            current_span.set_tag("error.type", type(e).__name__)
+            current_span.set_data("error.message", str(e))
+            current_span.set_data("job.id", job_id)
 
         # Handle failure
         if job:
@@ -368,8 +365,6 @@ def process_document(self=None, job_id: int=None):
 
             # Update Sentry span with actual retry count after increment
             if 'job' in locals() and job:
-                if transaction:
-                    transaction.set_data("job.retry_count", job.retry_count)
                 current_span = get_current_span()
                 if current_span:
                     current_span.set_data("job.retry_count", int(job.retry_count))
