@@ -347,6 +347,9 @@ def process_document(self=None, job_id: int=None):
         }
 
     except Exception as e:
+        # Capture exception in Sentry
+        sentry_sdk.capture_exception(e)
+
         # Set error tags on transaction
         if transaction:
             transaction.set_tag("job.status", "failed")
