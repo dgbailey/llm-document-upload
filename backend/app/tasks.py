@@ -240,10 +240,9 @@ def process_document(self=None, job_id: int=None):
             job.retry_count += 1
 
             # Update Sentry span with actual retry count after increment
-            if 'job' in locals() and job:
-                current_span = get_current_span()
-                if current_span:
-                    current_span.set_data("job.retry_count", int(job.retry_count))
+            current_span = get_current_span()
+            if current_span:
+                current_span.set_data("job.retry_count", int(job.retry_count))
 
             # Retry if under max retries
             if job.retry_count < job.max_retries and self:
