@@ -9,7 +9,7 @@ import random
 import asyncio
 import time
 import sentry_sdk
-from sentry_sdk import start_span, set_tag, set_context, get_current_span, metrics
+from sentry_sdk import start_span, set_context, get_current_span
 
 class CallbackTask(Task):
     def on_success(self, retval, task_id, args, kwargs):
@@ -27,11 +27,9 @@ def process_document(self=None, job_id: int=None):
     # Get the current span (transaction created by CeleryIntegration)
     current_span = get_current_span()
     if current_span:
-        # Set tags on the transaction
-        current_span.set_tag("job.id", job_id)
-        current_span.set_tag("task.name", "process_document")
         # Set data attributes
         current_span.set_data("job.id", int(job_id))
+        current_span.set_data("task.name", "process_document")
 
     db = SessionLocal()
     try:
@@ -45,16 +43,16 @@ def process_document(self=None, job_id: int=None):
             if not document:
                 raise ValueError(f"Document {job.document_id} not found")
 
-        # Set document and provider tags on transaction
+        # Set document and provider data on transaction
         current_span = get_current_span()
         if current_span:
-            current_span.set_tag("document.id", document.id)
-            current_span.set_tag("document.type", document.document_type)
-            current_span.set_tag("ai.provider", job.ai_provider)
+            current_span.set_data("document.id", int(document.id))
+            current_span.set_data("document.type", str(document.document_type))
+            current_span.set_data("ai.provider", str(job.ai_provider))
             if job.fallback_provider:
-                current_span.set_tag("ai.fallback_provider", job.fallback_provider)
-            current_span.set_tag("job.is_demo", job.is_demo)
-            current_span.set_tag("job.retry_count", job.retry_count)  # Add retry count as tag
+                current_span.set_data("ai.fallback_provider", str(job.fallback_provider))
+            current_span.set_data("job.is_demo", bool(job.is_demo))
+            current_span.set_data("job.retry_count", int(job.retry_count))
 
         # Set span attributes on the transaction for metrics
         current_span = get_current_span()
@@ -91,23 +89,6 @@ def process_document(self=None, job_id: int=None):
             extract_span.set_data("document.id", int(document.id))
             extract_span.set_data("document.type", str(document.document_type))
             extract_span.set_data("document.size", int(document.file_size) if document.file_size is not None else 0)
-
-            # Record metrics for document processing
-            metrics.distribution(
-                key="document.size",
-                value=int(document.file_size) if document.file_size else 0,
-                unit="byte",
-                tags={
-                    "document_type": str(document.document_type),
-                    "provider": str(job.ai_provider)
-                }
-            )
-            metrics.gauge(
-                key="document.pages",
-                value=int(page_count) if page_count else 0,
-                unit="page",
-                tags={"document_type": str(document.document_type)}
-            )
 
         # Initialize AI provider manager
         manager = AIProviderManager()
@@ -147,42 +128,10 @@ def process_document(self=None, job_id: int=None):
             ai_span.set_data("ai.key_points.count", int(len(result.key_points)) if result.key_points else 0)
             ai_span.set_data("ai.entities.count", int(len(result.entities)) if result.entities else 0)
 
-            # Record token metrics
-            metrics.distribution(
-                key="ai.tokens.used",
-                value=int(result.tokens_used) if result.tokens_used else 0,
-                unit="token",
-                tags={
-                    "provider": str(result.provider_used),
-                    "document_id": str(document.id),
-                    "is_demo": str(job.is_demo)
-                }
-            )
-
-            # Record cost metrics
-            metrics.distribution(
-                key="ai.cost",
-                value=float(result.cost) if result.cost else 0.0,
-                unit="usd",
-                tags={
-                    "provider": str(result.provider_used),
-                    "document_type": str(document.document_type)
-                }
-            )
-
             # Calculate cost savings
             if job.estimated_cost:
                 ai_span.set_data("ai.cost.savings", float(job.estimated_cost - result.cost))
                 ai_span.set_data("ai.cost.savings_percent", float(((job.estimated_cost - result.cost) / job.estimated_cost) * 100))
-
-                # Record cost savings metric
-                metrics.gauge(
-                    key="ai.cost.savings",
-                    value=float(job.estimated_cost - result.cost),
-                    unit="usd",
-                    tags={"provider": str(result.provider_used)}
-                )
-
 
         # Update job with results
         with start_span(op="db.update", description="Save job results") as update_span:
@@ -200,93 +149,13 @@ def process_document(self=None, job_id: int=None):
             update_span.set_data("job.final_status", "completed")
             update_span.set_data("job.processing_time_seconds", float(job.processing_time))
 
-            # Record processing time metric
-            metrics.distribution(
-                key="job.processing_time",
-                value=float(job.processing_time) if job.processing_time else 0.0,
-                unit="second",
-                tags={
-                    "provider": str(result.provider_used),
-                    "status": "completed",
-                    "retry_count": str(job.retry_count),
-                    "document_type": str(document.document_type)
-                }
-            )
-
-            # Record retry metrics
-            metrics.distribution(
-                key="job.retry_count",
-                value=int(job.retry_count),
-                unit="retry",
-                tags={
-                    "provider": str(job.ai_provider),
-                    "status": "completed"
-                }
-            )
-
-            # Record cost efficiency (cost per 1000 tokens)
-            if result.tokens_used > 0:
-                cost_per_1k_tokens = (result.cost / result.tokens_used) * 1000
-                metrics.distribution(
-                    key="ai.cost_per_1k_tokens",
-                    value=float(cost_per_1k_tokens),
-                    unit="usd",
-                    tags={
-                        "provider": str(result.provider_used),
-                        "document_type": str(document.document_type)
-                    }
-                )
-
-            # Record token density (tokens per KB)
-            if document.file_size > 0:
-                tokens_per_kb = result.tokens_used / (document.file_size / 1024)
-                metrics.distribution(
-                    key="document.token_density",
-                    value=float(tokens_per_kb),
-                    unit="token/kb",
-                    tags={
-                        "document_type": str(document.document_type),
-                        "provider": str(result.provider_used)
-                    }
-                )
-
-            # Record cost variance
-            if job.estimated_cost > 0:
-                cost_variance_pct = ((result.cost - job.estimated_cost) / job.estimated_cost) * 100
-                metrics.distribution(
-                    key="ai.cost_variance_pct",
-                    value=float(cost_variance_pct),
-                    unit="percent",
-                    tags={
-                        "provider": str(result.provider_used),
-                        "document_type": str(document.document_type)
-                    }
-                )
-
-            # Record document size bucket for analysis
-            size_bucket = "small"  # < 100KB
-            if document.file_size > 1024 * 1024:  # > 1MB
-                size_bucket = "large"
-            elif document.file_size > 100 * 1024:  # > 100KB
-                size_bucket = "medium"
-
-            metrics.distribution(
-                key="job.processing_time_by_size",
-                value=float(job.processing_time) if job.processing_time else 0.0,
-                unit="second",
-                tags={
-                    "size_bucket": size_bucket,
-                    "provider": str(result.provider_used)
-                }
-            )
-
             db.commit()
 
-        # Set final transaction tags
+        # Set final transaction data
         current_span = get_current_span()
         if current_span:
-            current_span.set_tag("job.status", "completed")
-            current_span.set_tag("ai.provider.final", result.provider_used)
+            current_span.set_data("job.status", "completed")
+            current_span.set_data("ai.provider.final", str(result.provider_used))
 
         # Update transaction span attributes with final metrics
         current_span = get_current_span()
@@ -349,13 +218,13 @@ def process_document(self=None, job_id: int=None):
         # Capture exception in Sentry
         sentry_sdk.capture_exception(e)
 
-        # Set error tags on transaction
+        # Set error data on transaction
         current_span = get_current_span()
         if current_span:
-            current_span.set_tag("job.status", "failed")
-            current_span.set_tag("error.type", type(e).__name__)
+            current_span.set_data("job.status", "failed")
+            current_span.set_data("error.type", type(e).__name__)
             current_span.set_data("error.message", str(e))
-            current_span.set_data("job.id", job_id)
+            current_span.set_data("job.id", int(job_id))
 
         # Handle failure
         if job:
@@ -368,17 +237,6 @@ def process_document(self=None, job_id: int=None):
                 current_span = get_current_span()
                 if current_span:
                     current_span.set_data("job.retry_count", int(job.retry_count))
-
-                # Record failure metrics
-                metrics.increment(
-                    key="job.failures",
-                    value=1,
-                    tags={
-                        "provider": str(job.ai_provider),
-                        "retry_attempt": str(job.retry_count),
-                        "error_type": type(e).__name__
-                    }
-                )
 
             # Retry if under max retries
             if job.retry_count < job.max_retries and self:
