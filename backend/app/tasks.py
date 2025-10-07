@@ -95,43 +95,50 @@ def process_document(self=None, job_id: int=None):
 
         # Run async summarization
         with start_span(op="ai.summarize", description="AI summarization") as ai_span:
-            # Set data before processing
-            ai_span.set_data("ai.provider.primary", str(job.ai_provider))
-            ai_span.set_data("ai.provider.fallback", str(job.fallback_provider) if job.fallback_provider else "none")
-            ai_span.set_data("ai.cost.estimated", float(job.estimated_cost) if job.estimated_cost is not None else 0.0)
-            ai_span.set_data("ai.tokens.estimated", int(job.estimated_tokens) if job.estimated_tokens is not None else 0)
-            ai_span.set_data("ai.demo_mode", bool(job.is_demo))
-            # Also set document size on AI span for aggregation
-            ai_span.set_data("document.size", int(document.file_size) if document.file_size is not None else 0)
-            ai_span.set_data("document.id", int(document.id))
-
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
             try:
-                result = loop.run_until_complete(
-                    manager.summarize_with_fallback(
-                        text,
-                        job.ai_provider,
-                        job.fallback_provider,
-                        demo_mode=job.is_demo
+                # Set data before processing
+                ai_span.set_data("ai.provider.primary", str(job.ai_provider))
+                ai_span.set_data("ai.provider.fallback", str(job.fallback_provider) if job.fallback_provider else "none")
+                ai_span.set_data("ai.cost.estimated", float(job.estimated_cost) if job.estimated_cost is not None else 0.0)
+                ai_span.set_data("ai.tokens.estimated", int(job.estimated_tokens) if job.estimated_tokens is not None else 0)
+                ai_span.set_data("ai.demo_mode", bool(job.is_demo))
+                # Also set document size on AI span for aggregation
+                ai_span.set_data("document.size", int(document.file_size) if document.file_size is not None else 0)
+                ai_span.set_data("document.id", int(document.id))
+
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+                try:
+                    result = loop.run_until_complete(
+                        manager.summarize_with_fallback(
+                            text,
+                            job.ai_provider,
+                            job.fallback_provider,
+                            demo_mode=job.is_demo
+                        )
                     )
-                )
-            finally:
-                loop.close()
+                finally:
+                    loop.close()
 
-            # Set AI processing result data
-            ai_span.set_data("ai.tokens.actual", int(result.tokens_used) if result.tokens_used is not None else 0)
-            ai_span.set_data("ai.cost.actual", float(result.cost) if result.cost is not None else 0.0)
-            ai_span.set_data("ai.provider.used", str(result.provider_used))
-            ai_span.set_data("ai.summary.length", int(len(result.summary)) if result.summary else 0)
-            ai_span.set_data("ai.key_points.count", int(len(result.key_points)) if result.key_points else 0)
-            ai_span.set_data("ai.entities.count", int(len(result.entities)) if result.entities else 0)
+                # Set AI processing result data
+                ai_span.set_data("ai.tokens.actual", int(result.tokens_used) if result.tokens_used is not None else 0)
+                ai_span.set_data("ai.cost.actual", float(result.cost) if result.cost is not None else 0.0)
+                ai_span.set_data("ai.provider.used", str(result.provider_used))
+                ai_span.set_data("ai.summary.length", int(len(result.summary)) if result.summary else 0)
+                ai_span.set_data("ai.key_points.count", int(len(result.key_points)) if result.key_points else 0)
+                ai_span.set_data("ai.entities.count", int(len(result.entities)) if result.entities else 0)
 
-            # Calculate cost savings
-            if job.estimated_cost:
-                ai_span.set_data("ai.cost.savings", float(job.estimated_cost - result.cost))
-                ai_span.set_data("ai.cost.savings_percent", float(((job.estimated_cost - result.cost) / job.estimated_cost) * 100))
+                # Calculate cost savings
+                if job.estimated_cost:
+                    ai_span.set_data("ai.cost.savings", float(job.estimated_cost - result.cost))
+                    ai_span.set_data("ai.cost.savings_percent", float(((job.estimated_cost - result.cost) / job.estimated_cost) * 100))
+            except Exception as e:
+                # Capture exception within AI span context
+                ai_span.set_data("error.type", type(e).__name__)
+                ai_span.set_data("error.message", str(e))
+                sentry_sdk.capture_exception(e)
+                raise
 
         # Update job with results
         with start_span(op="db.update", description="Save job results") as update_span:
